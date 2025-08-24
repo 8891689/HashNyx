@@ -82,6 +82,11 @@ cat hashes.txt | ./HashNyx_bloom   ,  type 1.txt | HashNyx_bloom.exe
 ```
 
 Examples
+
+Testing and Verification
+
+Based on Intel® Xeon® E5-2697 v4 2.30 GHz single-threaded environment
+
 1. Extremely Fast Single Hash Mode Sequential Cracking
 Use a single thread to crack the hash values ​​of passwords between 5 and 10 characters in length.
 
