@@ -205,14 +205,15 @@ The random password needs to add -R
 
 ```
 # Other ps 
-
+```
 d | 0123456789 [0-9]
 l | abcdefghijklmnopqrstuvwxyz [a-z]
 u | ABCDEFGHIJKLMNOPQRSTUVWXYZ [A-Z]
 k | 0123456789ABCDEF [0-9A-F]
 s | !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
 all | abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:'\",.<>?/`~"
-
+```
+```
 -l <range>      Password length range (e.g., 8-10 or 8).
 -c <sets>       Charset, comma-separated (d,u,l,s,k,all,pkc).
 
@@ -223,7 +224,7 @@ s:special,
 k:hex, 
 all:all
 pkc: public key mode (same as -pub)
-
+```
 You can use to separate the character sets needed for password cracking, such as numbers, uppercase letters -c d,u or all -c all
 
 Note that the generator will produce passwords longer than 13 characters, requiring -R, as the increment would exceed the count limit.
