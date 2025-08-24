@@ -153,7 +153,7 @@ or
 
 ```
 3. Batch Hash Password Cracking Using a Bloom Filter
-Use a pre-calculated Bloom filter (filter.bf) to quickly filter candidate results, then compare them to the complete list in 1.txt (check again before outputting to ensure 100% accuracy). This method is particularly effective when the search space is large.
+Use a pre-calculated Bloom filter (targets.bf) to quickly filter candidate results, then compare them to the complete list in 1.txt (check again before outputting to ensure 100% accuracy). This method is particularly effective when the search space is large.
 ```
  ./HashNyx -t 1 -l 5-9 -c d -m sha256 -b targets.bf -f 1.txt -o 111.txt
 [+] Found matches will be written to: 111.txt
