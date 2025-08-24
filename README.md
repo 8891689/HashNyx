@@ -1,11 +1,11 @@
 # HashNyx
 
-HashNyx is a high-performance, multi-threaded password hash cracker written in C. It is designed for flexibility and speed, utilizing various optimization techniques to efficiently find matches for given hash values.
+HashNyx is a top-tier CPU-powered multi-threaded password hash cracker written in C. It is designed for flexibility and speed, utilizing various optimization techniques to efficiently find matches for a given hash value. It can crack md5, sha1, sha256, ripemd160, keccak256, hash160, and more.
 
 
 # Features
 Multi-threaded Architecture: Utilizes a producer-consumer model to maximize CPU usage, separating password generation from hash verification.
-1. Multiple Hash Algorithms: Supports common hashing algorithms including md5, sha1, sha256, ripemd160, keccak256, and hash160.
+1. Multiple Hash Algorithms: Supports common hashing algorithms including md5, sha1, sha256, ripemd160, keccak256, and hash160（Encrypted BTC public key）.
 
 2. Flexible Password Generation:
 1. Sequential Mode: Generates all possible combinations for a given length range and character set.
