@@ -5,7 +5,7 @@ HashNyx is a high-performance, multi-threaded password hash cracker written in C
 
 # Features
 Multi-threaded Architecture: Utilizes a producer-consumer model to maximize CPU utilization and separates password generation from hash verification.
-1. Multiple Hash Algorithms: Supports common hash algorithms, currently limited to (more to come): MD5, SHA1, RIPEMD160, Hash160, SM3, SHA224, SHA256, SHA384, SHA512, SHA3-224, SHA3-256, SHA3-384, SHA3-512, Keccak224, Keccak256, Keccak384, Keccak512, and Hash160.
+1. Multiple Hash Algorithms: Supports common hash algorithms, currently limited to (more to come): MD5, SHA1, RIPEMD160, SM3, SHA224, SHA256, SHA384, SHA512, SHA3-224, SHA3-256, SHA3-384, SHA3-512, Keccak224, Keccak256, Keccak384, Keccak512, and Hash160（BTC public key）.
 
 2. Flexible Password Generation:
 1. Sequential Mode: Generates all possible combinations for a given length range and character set.
