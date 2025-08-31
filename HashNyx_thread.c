@@ -19,9 +19,12 @@
 #include "utils.h"
 #include "md5_avx2.h"
 #include "sha1_avx2.h"
-#include "sha256_avx2.h"
 #include "ripemd160_avx2.h"
 #include "keccak_avx2.h"
+#include "sha2_avx2.h" 
+#include "sha3_avx2.h"
+#include "sm3_avx2.h"
+
 #include "wandian.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +56,22 @@ void* verification_thread_worker(void* arg) {
         }
     }
     return NULL;
+}
+
+static inline void sha512_pad_block(uint8_t padded_block[128], const char* input, size_t len) {
+    memcpy(padded_block, input, len);
+    padded_block[len] = 0x80;
+    memset(padded_block + len + 1, 0, 128 - len - 1);
+    // 將長度（以位元為單位）寫入區塊的最後 16 個位元組（大端序）
+    uint64_t bit_len = len * 8;
+    padded_block[127] = (uint8_t)(bit_len);
+    padded_block[126] = (uint8_t)(bit_len >> 8);
+    padded_block[125] = (uint8_t)(bit_len >> 16);
+    padded_block[124] = (uint8_t)(bit_len >> 24);
+    padded_block[123] = (uint8_t)(bit_len >> 32);
+    padded_block[122] = (uint8_t)(bit_len >> 40);
+    padded_block[121] = (uint8_t)(bit_len >> 48);
+    padded_block[120] = (uint8_t)(bit_len >> 56);
 }
 
 // ++++++++++++++++++++++++ 全新高性能宏，模式的输出逻辑 ++++++++++++++++++++++++
@@ -110,309 +129,533 @@ do { \
     \
 } while (0)
 
+
 void* cracker_thread_worker(void* arg) {
     ThreadData *data = (ThreadData *)arg;
 
-    // --- 初始化哈希上下文  ---
-    MD5_CTX_AVX2 md5_ctx;
-    SHA1_CTX_AVX2 sha1_ctx;
-    Sha256Avx8_C_Handle* sha256_handle = sha256_avx8_create();
-    RIPEMD160_MULTI_CTX ripemd160_ctx;
+    // --- 初始化哈希上下文 ---
     #define BATCH_SIZE 8
+    int total_threads = data->state->thread_count;
 
-    if (data->random) {
-        char passwords[BATCH_SIZE][MAX_PASSWORD_LENGTH + 1];
+    SHA2_x8_CTX* sha224_handle = (data->hash_mode == MODE_SHA224) ? sha224_x8_create() : NULL;
+    SHA2_x8_CTX* sha256_handle = (data->hash_mode == MODE_SHA256 || data->hash_mode == MODE_HASH160) ? sha256_x8_create() : NULL;
+    SHA2_x8_CTX* sha384_handle = (data->hash_mode == MODE_SHA384) ? sha384_x8_create() : NULL;
+    SHA2_x8_CTX* sha512_handle = (data->hash_mode == MODE_SHA512) ? sha512_x8_create() : NULL;
+
+    // ========================================================================
+    // ============================ 公鑰模式 (Public Key Mode) =================
+    // ========================================================================
+    if (data->pubkey_mode) {
+        char hex_passwords[BATCH_SIZE][MAX_PASSWORD_LENGTH + 1];
         const uint8_t* password_ptrs[BATCH_SIZE];
-        size_t password_lens[BATCH_SIZE];
         uint8_t binary_pubkeys[BATCH_SIZE][33];
 
-        static const char hex_chars[] = "0123456789abcdef";
-
         for (int i = 0; i < BATCH_SIZE; ++i) {
-            if (data->pubkey_mode) {
-                password_ptrs[i] = binary_pubkeys[i];
-            } else {
-                password_ptrs[i] = (const uint8_t*)passwords[i];
+            password_ptrs[i] = binary_pubkeys[i];
+        }
+
+        if (data->random) {
+            // --- 隨機公鑰模式 ---
+            struct Xoshiro256StarStar gen;
+            pthread_mutex_lock(data->state->mutex);
+            static struct Xoshiro256StarStar master_gen;
+            static bool master_gen_initialized = false;
+            if (!master_gen_initialized) {
+                struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+                uint64_t initial_seed = (uint64_t)ts.tv_sec * 1000000007ULL + (uint64_t)ts.tv_nsec;
+                xoshiro_seed(&master_gen, initial_seed); master_gen_initialized = true;
             }
-        }
+            gen.s[0] = xoshiro_next(&master_gen); gen.s[1] = xoshiro_next(&master_gen);
+            gen.s[2] = xoshiro_next(&master_gen); gen.s[3] = xoshiro_next(&master_gen);
+            pthread_mutex_unlock(data->state->mutex);
 
-        struct Xoshiro256StarStar gen;
-        xoshiro_init(&gen, data->prng_seed);
-        gen.s[0] = data->prng_seed[0];
-        gen.s[1] = data->prng_seed[1];
-        gen.s[2] = data->prng_seed[2];
-        gen.s[3] = data->prng_seed[3];
-        
-        
-        pthread_mutex_lock(data->state->mutex); 
-        
-        // 只有在第一次被调用时（例如由线程0）才初始化主 PRNG
-        static struct Xoshiro256StarStar master_gen;
-        static bool master_gen_initialized = false;
-        if (!master_gen_initialized) {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            // 使用更强的初始种子
-            uint64_t initial_seed = (uint64_t)ts.tv_sec * 1000000007ULL + (uint64_t)ts.tv_nsec;
-            xoshiro_seed(&master_gen, initial_seed);
-            master_gen_initialized = true;
-        }
-
-        // 从主 PRNG 中获取 4 个 64 位随机数，作为当前线程 PRNG 的状态
-        gen.s[0] = xoshiro_next(&master_gen);
-        gen.s[1] = xoshiro_next(&master_gen);
-        gen.s[2] = xoshiro_next(&master_gen);
-        gen.s[3] = xoshiro_next(&master_gen);
-
-        pthread_mutex_unlock(data->state->mutex); // 解锁
-
-         // ========================================================================
-         // ============================   隨機模式   ==========================
-        // ========================================================================     
-        uint8_t keccak_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
-        unsigned char* hashes_out_ptrs[BATCH_SIZE];
-        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = keccak_hashes[i];
-        
-        long long total_count_ll = data->infinite ? -1 : (long long)(data->endIndex - data->startIndex);
-
-        for (long long current_proc = 0; total_count_ll == -1 || current_proc < total_count_ll; current_proc += BATCH_SIZE) {
-            
-            // --- 密碼生成邏輯 ---
-            if (data->pubkey_mode) {
-                const int BIN_KEY_LENGTH = 33;
+            long long total_count_ll = data->infinite ? -1 : (long long)(data->endIndex - data->startIndex);
+            for (long long current_proc = 0; total_count_ll == -1 || current_proc < total_count_ll; current_proc += BATCH_SIZE) {
                 for (int i = 0; i < BATCH_SIZE; ++i) {
                     binary_pubkeys[i][0] = (xoshiro_next(&gen) & 1) ? 0x03 : 0x02;
-                    for (int j = 1; j < BIN_KEY_LENGTH; ++j) {
-                        binary_pubkeys[i][j] = (uint8_t)xoshiro_next(&gen);
-                    }
-                    for(int j = 0; j < BIN_KEY_LENGTH; ++j) {
-                        uint8_t byte = binary_pubkeys[i][j];
-                        passwords[i][j * 2]     = hex_chars[byte >> 4];
-                        passwords[i][j * 2 + 1] = hex_chars[byte & 0x0F];
-                    }
-                    passwords[i][66] = '\0';
-                    password_lens[i] = BIN_KEY_LENGTH;
+                    for (int j = 1; j < 33; ++j) { binary_pubkeys[i][j] = (uint8_t)xoshiro_next(&gen); }
+                    bytes_to_hex_fast(binary_pubkeys[i], 33, hex_passwords[i]);
                 }
-            } else { // --- 普通隨機密碼邏輯 ---
-                bool is_power_of_two = (data->charsetLength > 0) && ((data->charsetLength & (data->charsetLength - 1)) == 0);
+                
+                switch (data->hash_mode) {
+                    case MODE_HASH160: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        uint8_t h160_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        const uint8_t* sha256_ptrs[BATCH_SIZE];
+                        size_t sha256_lens_static[BATCH_SIZE];
+                        for(int i = 0; i < BATCH_SIZE; ++i) {
+                            sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], 33);
+                            sha256_ptrs[i] = sha256_results[i];
+                            sha256_lens_static[i] = 32;
+                        }
+                        sha256_x8_init(sha256_handle);
+                        sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha256_x8_final(sha256_handle, sha256_results);
+                        ripemd160_multi_oneshot(sha256_ptrs, sha256_lens_static, h160_hashes);
+                        CHECK_AND_OUTPUT(h160_hashes, 20, hex_passwords, BATCH_SIZE);
+                        break;
+                    }
+                    default: break;
+                }
+                data->local_passwords_checked += BATCH_SIZE;
+            }
+        } else {
+            // --- 循序公鑰模式 (無限遞增) ---
+            u256 current_key = { {1, 0, 0, 0} }; 
+            
+            u128 offset = data->thread_id;
+            u256_add_u128(&current_key, offset);
 
+            while(true) {
+                int batch_count = 0;
+                for (int j = 0; j < BATCH_SIZE; ++j) {
+                    binary_pubkeys[j][0] = 0x02;
+                    u256_to_bytes_big_endian(&current_key, &binary_pubkeys[j][1]);
+                    bytes_to_hex_fast(binary_pubkeys[j], 33, hex_passwords[j]);
+
+                    for(int t = 0; t < total_threads; ++t) {
+                        u256_increment(&current_key);
+                    }
+                    batch_count++;
+                }
+                
+                if (batch_count > 0) {
+                     switch (data->hash_mode) {
+                        case MODE_HASH160: {
+                            uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
+                            uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
+                            uint8_t h160_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                            const uint8_t* sha256_ptrs[BATCH_SIZE];
+                            size_t sha256_lens_static[BATCH_SIZE];
+                            for(int i = 0; i < BATCH_SIZE; ++i) {
+                                sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], 33);
+                                sha256_ptrs[i] = sha256_results[i];
+                                sha256_lens_static[i] = 32;
+                            }
+                            sha256_x8_init(sha256_handle);
+                            sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                            sha256_x8_final(sha256_handle, sha256_results);
+                            ripemd160_multi_oneshot(sha256_ptrs, sha256_lens_static, h160_hashes);
+                            CHECK_AND_OUTPUT(h160_hashes, 20, hex_passwords, batch_count);
+                            break;
+                        }
+                        default: break;
+                    }
+                    data->local_passwords_checked += batch_count;
+                }
+            }
+        }
+    } else {
+        // ========================================================================
+        // ============================ 普通密碼模式 ============================
+        // ========================================================================
+        if (data->random) {
+            char passwords[BATCH_SIZE][MAX_PASSWORD_LENGTH + 1];
+            const uint8_t* password_ptrs[BATCH_SIZE];
+            size_t password_lens[BATCH_SIZE];
+            for (int i = 0; i < BATCH_SIZE; ++i) {
+                password_ptrs[i] = (const uint8_t*)passwords[i];
+            }
+
+            struct Xoshiro256StarStar gen;
+            pthread_mutex_lock(data->state->mutex);
+            static struct Xoshiro256StarStar master_gen;
+            static bool master_gen_initialized = false;
+            if (!master_gen_initialized) {
+                struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+                uint64_t initial_seed = (uint64_t)ts.tv_sec * 1000000007ULL + (uint64_t)ts.tv_nsec;
+                xoshiro_seed(&master_gen, initial_seed); master_gen_initialized = true;
+            }
+            gen.s[0] = xoshiro_next(&master_gen); gen.s[1] = xoshiro_next(&master_gen);
+            gen.s[2] = xoshiro_next(&master_gen); gen.s[3] = xoshiro_next(&master_gen);
+            pthread_mutex_unlock(data->state->mutex);
+
+            unsigned char* hashes_out_ptrs[BATCH_SIZE];
+            
+            long long total_count_ll = data->infinite ? -1 : (long long)(data->endIndex - data->startIndex);
+
+            for (long long current_proc = 0; total_count_ll == -1 || current_proc < total_count_ll; current_proc += BATCH_SIZE) {
+                // --- 普通隨機密碼邏輯 ---
+                bool is_power_of_two = (data->charsetLength > 0) && ((data->charsetLength & (data->charsetLength - 1)) == 0);
                 if (is_power_of_two) {
                     const uint32_t mask = data->charsetLength - 1;
                     for (int i = 0; i < BATCH_SIZE; ++i) {
                         int password_len = data->minLength;
-                        if (data->maxLength > data->minLength) {
-                            password_len += map_to_range_unbiased(&gen, data->maxLength - data->minLength + 1);
-                        }
+                        if (data->maxLength > data->minLength) { password_len += map_to_range_unbiased(&gen, data->maxLength - data->minLength + 1); }
                         password_lens[i] = password_len;
-
                         for (int j = 0; j < password_len; j += 2) {
                             uint64_t r = xoshiro_next(&gen);
                             passwords[i][j] = data->charset[(uint32_t)r & mask];
-                            if (j + 1 < password_len) {
-                                passwords[i][j + 1] = data->charset[(uint32_t)(r >> 32) & mask];
-                            }
+                            if (j + 1 < password_len) { passwords[i][j + 1] = data->charset[(uint32_t)(r >> 32) & mask]; }
                         }
                         passwords[i][password_len] = '\0';
                     }
                 } else {
                     for (int i = 0; i < BATCH_SIZE; ++i) {
                         int password_len = data->minLength;
-                        if (data->maxLength > data->minLength) {
-                            password_len += map_to_range_unbiased(&gen, data->maxLength - data->minLength + 1);
-                        }
+                        if (data->maxLength > data->minLength) { password_len += map_to_range_unbiased(&gen, data->maxLength - data->minLength + 1); }
                         password_lens[i] = password_len;
-
-                        for (int j = 0; j < password_len; ++j) {
-                            passwords[i][j] = data->charset[map_to_range_unbiased(&gen, data->charsetLength)];
-                        }
+                        for (int j = 0; j < password_len; ++j) { passwords[i][j] = data->charset[map_to_range_unbiased(&gen, data->charsetLength)]; }
                         passwords[i][password_len] = '\0';
                     }
                 }
-            }
-             
-            // --- 哈希計算 (隨機模式，總是滿批次) ---
-            switch (data->hash_mode) {
-                case MODE_MD5: {
-                    uint8_t md5_hashes[BATCH_SIZE][16] __attribute__((aligned(32)));
-                    MD5BatchInit(&md5_ctx);
-                    MD5BatchUpdate(&md5_ctx, password_ptrs, password_lens);
-                    MD5BatchFinal(&md5_ctx, md5_hashes);
-                    CHECK_AND_OUTPUT(md5_hashes, 16, passwords, BATCH_SIZE);
-                    break;
-                }
-                case MODE_SHA1: {
-                    uint8_t sha1_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    SHA1BatchInit(&sha1_ctx);
-                    SHA1BatchUpdate(&sha1_ctx, password_ptrs, password_lens);
-                    SHA1BatchFinal(&sha1_ctx, sha1_hashes);
-                    CHECK_AND_OUTPUT(sha1_hashes, 20, passwords, BATCH_SIZE);
-                    break;
-                }
-                case MODE_SHA256: {
-                    uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
-                    uint8_t sha256_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
-                    for(int i = 0; i < BATCH_SIZE; ++i) { sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
-                    sha256_avx8_init(sha256_handle);
-                    sha256_avx8_update_8_blocks(sha256_handle, (const uint8_t(*)[64])padded_blocks);
-                    sha256_avx8_get_final_hashes(sha256_handle, sha256_hashes);
-                    CHECK_AND_OUTPUT(sha256_hashes, 32, passwords, BATCH_SIZE);
-                    break;
-                }
-                case MODE_RIPEMD160: {
-                    uint8_t r_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    ripemd160_multi_init(&ripemd160_ctx);
-                    for(int i=0; i<BATCH_SIZE; ++i) { memcpy(ripemd160_ctx.buffer[i], password_ptrs[i], password_lens[i]); ripemd160_ctx.buffer_len[i] = (uint32_t)password_lens[i]; }
-                    ripemd160_multi_final(&ripemd160_ctx, r_hashes);
-                    CHECK_AND_OUTPUT(r_hashes, 20, passwords, BATCH_SIZE);
-                    break;
-                }
-                case MODE_KECCAK256: {
-                    keccak_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
-                    CHECK_AND_OUTPUT(keccak_hashes, 32, passwords, BATCH_SIZE);
-                    break;
-                }
-                case MODE_HASH160: {
-                    uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
-                    uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
-                    uint8_t h160_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    for(int i = 0; i < BATCH_SIZE; ++i) { sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
-                    sha256_avx8_init(sha256_handle);
-                    sha256_avx8_update_8_blocks(sha256_handle, (const uint8_t(*)[64])padded_blocks);
-                    sha256_avx8_get_final_hashes(sha256_handle, sha256_results);
-                    ripemd160_multi_init(&ripemd160_ctx);
-                    for(int i=0; i<BATCH_SIZE; ++i) { memcpy(ripemd160_ctx.buffer[i], sha256_results[i], 32); ripemd160_ctx.buffer_len[i] = 32; }
-                    ripemd160_multi_final(&ripemd160_ctx, h160_hashes);
-                    CHECK_AND_OUTPUT(h160_hashes, 20, passwords, BATCH_SIZE);
-                    break;
-                }
-            }
-            data->local_passwords_checked += BATCH_SIZE;
-        }
+                
+                // --- 哈希計算 (隨機模式) ---
+                switch (data->hash_mode) {
+                    case MODE_MD5: {
+                        uint8_t md5_hashes[BATCH_SIZE][16] __attribute__((aligned(32)));
+                        MD5BatchOneShot(password_ptrs, password_lens, md5_hashes);
+                        CHECK_AND_OUTPUT(md5_hashes, 16, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA1: {
+                        uint8_t sha1_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        SHA1BatchOneShot(password_ptrs, password_lens, sha1_hashes);
+                        CHECK_AND_OUTPUT(sha1_hashes, 20, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_RIPEMD160: {
+                        uint8_t r_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        ripemd160_multi_oneshot((const uint8_t **)password_ptrs, password_lens, r_hashes);
+                        CHECK_AND_OUTPUT(r_hashes, 20, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA224: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        uint8_t sha224_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for(int i = 0; i < BATCH_SIZE; ++i) { sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
+                        sha224_x8_init(sha224_handle);
+                        sha224_x8_update(sha224_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha224_x8_final(sha224_handle, sha224_hashes);
+                        CHECK_AND_OUTPUT(sha224_hashes, 28, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA256: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        uint8_t sha256_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for(int i = 0; i < BATCH_SIZE; ++i) { sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
+                        sha256_x8_init(sha256_handle);
+                        sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha256_x8_final(sha256_handle, sha256_hashes);
+                        CHECK_AND_OUTPUT(sha256_hashes, 32, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA384: {
+                        uint8_t padded_blocks[BATCH_SIZE][128] __attribute__((aligned(32)));
+                        uint8_t sha384_hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for(int i = 0; i < BATCH_SIZE; ++i) { sha512_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
+                        sha384_x8_init(sha384_handle);
+                        sha384_x8_update(sha384_handle, (const uint8_t(*)[128])padded_blocks);
+                        sha384_x8_final(sha384_handle, sha384_hashes);
+                        CHECK_AND_OUTPUT(sha384_hashes, 48, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA512: {
+                        uint8_t padded_blocks[BATCH_SIZE][128] __attribute__((aligned(32)));
+                        uint8_t sha512_hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for(int i = 0; i < BATCH_SIZE; ++i) { sha512_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]); }
+                        sha512_x8_init(sha512_handle);
+                        sha512_x8_update(sha512_handle, (const uint8_t(*)[128])padded_blocks);
+                        sha512_x8_final(sha512_handle, sha512_hashes);
+                        CHECK_AND_OUTPUT(sha512_hashes, 64, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SM3: {
+                        uint8_t sm3_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        sm3_8x((const unsigned char**)password_ptrs, password_lens, sm3_hashes);
+                        CHECK_AND_OUTPUT(sm3_hashes, 32, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA3_224: {
+                        uint8_t hashes[BATCH_SIZE][28] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_224((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 28, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA3_256: {
+                        uint8_t hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 32, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA3_384: {
+                        uint8_t hashes[BATCH_SIZE][48] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_384((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 48, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_SHA3_512: {
+                        uint8_t hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_512((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 64, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_KECCAK224: {
+                        uint8_t hashes[BATCH_SIZE][28] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_224((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 28, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_KECCAK256: {
+                        uint8_t hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 32, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_KECCAK384: {
+                        uint8_t hashes[BATCH_SIZE][48] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_384((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 48, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_KECCAK512: {
+                        uint8_t hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_512((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 64, passwords, BATCH_SIZE);
+                        break;
+                    }
+                    case MODE_HASH160: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        uint8_t h160_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        const uint8_t* sha256_ptrs[BATCH_SIZE];
+                        size_t sha256_lens[BATCH_SIZE];
 
-    // ========================================================================
-    // ============================ 順序模式 (Sequential Mode) ==========================
-    // ========================================================================
-    } else {
-        const VectorU128* start_indices = (const VectorU128*)data->start_indices_per_length;
-        const char* charset = data->charset;
-        const int charsetLength = data->charsetLength;
-        size_t low = 0, high = start_indices->size, mid;
-        while(low < high) { mid = low + (high - low) / 2; if (data->startIndex >= start_indices->data[mid]) low = mid + 1; else high = mid; }
-        int current_len_offset = low > 0 ? low - 1 : 0;
-        int current_len = data->minLength + current_len_offset;
-        u128 local_idx = data->startIndex - start_indices->data[current_len_offset];
-        int indices[MAX_PASSWORD_LENGTH] = {0}; 
-        u128 temp_idx = local_idx;
-        for (int pos = current_len - 1; pos >= 0; --pos) { indices[pos] = (int)(temp_idx % charsetLength); temp_idx /= charsetLength; }
-        
-        u128 passwords_to_generate = data->endIndex - data->startIndex;
-        
-        char password_batch[BATCH_SIZE][MAX_PASSWORD_LENGTH + 1];
-        const uint8_t* password_ptrs[BATCH_SIZE];
-        size_t password_lens[BATCH_SIZE];
-        for(int k=0; k < BATCH_SIZE; ++k) {
-            password_ptrs[k] = (const uint8_t*)password_batch[k];
-        }
-
-        uint8_t keccak_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
-        unsigned char* hashes_out_ptrs[BATCH_SIZE];
-        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = keccak_hashes[i];
-
-        static const char* empty_string = "";
-
-        for (u128 i = 0; i < passwords_to_generate; ) {
-            
-            int batch_count = 0;
-            for (int j = 0; j < BATCH_SIZE && i < passwords_to_generate; ++j, ++i) {
-                for (int k = 0; k < current_len; ++k) {
-                    password_batch[j][k] = charset[indices[k]];
-                }
-                password_batch[j][current_len] = '\0';
-                password_lens[j] = current_len;
-
-                for (int pos = current_len - 1; pos >= 0; --pos) {
-                    indices[pos]++;
-                    if (indices[pos] < charsetLength) break;
-                    indices[pos] = 0;
-                    if (pos == 0) {
-                        current_len++;
+                        for(int i = 0; i < BATCH_SIZE; ++i) { 
+                            sha256_pad_block(padded_blocks[i], (const char*)password_ptrs[i], password_lens[i]);
+                            sha256_ptrs[i] = sha256_results[i];
+                            sha256_lens[i] = 32;
+                        }
+                        sha256_x8_init(sha256_handle);
+                        sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha256_x8_final(sha256_handle, sha256_results);
+                        
+                        ripemd160_multi_oneshot(sha256_ptrs, sha256_lens, h160_hashes);
+                        CHECK_AND_OUTPUT(h160_hashes, 20, passwords, BATCH_SIZE);
+                        break;
                     }
                 }
-                batch_count++;
+                data->local_passwords_checked += BATCH_SIZE;
             }
-
-            if (batch_count == 0) break;
+        } else {
+            // --- 循序字元集模式 ---
+            const VectorU128* start_indices = (const VectorU128*)data->start_indices_per_length;
+            const char* charset = data->charset;
+            const int charsetLength = data->charsetLength;
+            size_t low = 0, high = start_indices->size, mid;
+            while(low < high) { mid = low + (high - low) / 2; if (data->startIndex >= start_indices->data[mid]) low = mid + 1; else high = mid; }
+            int current_len_offset = low > 0 ? low - 1 : 0;
+            int current_len = data->minLength + current_len_offset;
+            u128 local_idx = data->startIndex - start_indices->data[current_len_offset];
+            int indices[MAX_PASSWORD_LENGTH] = {0}; 
+            u128 temp_idx = local_idx;
+            for (int pos = current_len - 1; pos >= 0; --pos) { indices[pos] = (int)(temp_idx % charsetLength); temp_idx /= charsetLength; }
             
-            if (batch_count < BATCH_SIZE) {
-                for (int k = batch_count; k < BATCH_SIZE; ++k) {
-                    password_ptrs[k] = (const uint8_t*)empty_string;
-                    password_lens[k] = 0;
-                }
+            u128 passwords_to_generate = data->endIndex - data->startIndex;
+            
+            char password_batch[BATCH_SIZE][MAX_PASSWORD_LENGTH + 1];
+            const uint8_t* password_ptrs[BATCH_SIZE];
+            size_t password_lens[BATCH_SIZE];
+            for(int k=0; k < BATCH_SIZE; ++k) {
+                password_ptrs[k] = (const uint8_t*)password_batch[k];
             }
 
-            // --- 哈希計算 (順序模式) ---
-            switch (data->hash_mode) {
-                case MODE_MD5: {
-                    uint8_t md5_hashes[BATCH_SIZE][16] __attribute__((aligned(32)));
-                    MD5BatchInit(&md5_ctx);
-                    MD5BatchUpdate(&md5_ctx, password_ptrs, password_lens);
-                    MD5BatchFinal(&md5_ctx, md5_hashes);
-                    CHECK_AND_OUTPUT(md5_hashes, 16, password_batch, batch_count);
-                    break;
+            unsigned char* hashes_out_ptrs[BATCH_SIZE];
+            static const char* empty_string = "";
+
+            for (u128 i = 0; i < passwords_to_generate; ) {
+                int batch_count = 0;
+                for (int j = 0; j < BATCH_SIZE && i < passwords_to_generate; ++j, ++i) {
+                    for (int k = 0; k < current_len; ++k) { password_batch[j][k] = charset[indices[k]]; }
+                    password_batch[j][current_len] = '\0';
+                    password_lens[j] = current_len;
+
+                    for (int pos = current_len - 1; pos >= 0; --pos) {
+                        indices[pos]++;
+                        if (indices[pos] < charsetLength) break;
+                        indices[pos] = 0;
+                        if (pos == 0) { current_len++; }
+                    }
+                    batch_count++;
                 }
-                case MODE_SHA1: {
-                    uint8_t sha1_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    SHA1BatchInit(&sha1_ctx);
-                    SHA1BatchUpdate(&sha1_ctx, password_ptrs, password_lens);
-                    SHA1BatchFinal(&sha1_ctx, sha1_hashes);
-                    CHECK_AND_OUTPUT(sha1_hashes, 20, password_batch, batch_count);
-                    break;
+
+                if (batch_count == 0) break;
+                
+                if (batch_count < BATCH_SIZE) {
+                    for (int k = batch_count; k < BATCH_SIZE; ++k) {
+                        password_ptrs[k] = (const uint8_t*)empty_string;
+                        password_lens[k] = 0;
+                    }
                 }
-                case MODE_SHA256: {
-                    uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32))) = {0};
-                    uint8_t sha256_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
-                    for(int k = 0; k < batch_count; ++k) { sha256_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
-                    sha256_avx8_init(sha256_handle);
-                    sha256_avx8_update_8_blocks(sha256_handle, (const uint8_t(*)[64])padded_blocks);
-                    sha256_avx8_get_final_hashes(sha256_handle, sha256_hashes);
-                    CHECK_AND_OUTPUT(sha256_hashes, 32, password_batch, batch_count);
-                    break;
+
+                // --- 哈希計算 (順序模式) ---
+                switch (data->hash_mode) {
+                    case MODE_MD5: {
+                        uint8_t md5_hashes[BATCH_SIZE][16] __attribute__((aligned(32)));
+                        MD5BatchOneShot(password_ptrs, password_lens, md5_hashes);
+                        CHECK_AND_OUTPUT(md5_hashes, 16, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA1: {
+                        uint8_t sha1_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        SHA1BatchOneShot(password_ptrs, password_lens, sha1_hashes);
+                        CHECK_AND_OUTPUT(sha1_hashes, 20, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_RIPEMD160: {
+                        uint8_t r_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        ripemd160_multi_oneshot((const uint8_t **)password_ptrs, password_lens, r_hashes);
+                        CHECK_AND_OUTPUT(r_hashes, 20, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA224: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32))) = {0};
+                        uint8_t sha224_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for(int k = 0; k < batch_count; ++k) { sha256_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
+                        sha224_x8_init(sha224_handle);
+                        sha224_x8_update(sha224_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha224_x8_final(sha224_handle, sha224_hashes);
+                        CHECK_AND_OUTPUT(sha224_hashes, 28, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA256: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32))) = {0};
+                        uint8_t sha256_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for(int k = 0; k < batch_count; ++k) { sha256_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
+                        sha256_x8_init(sha256_handle);
+                        sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha256_x8_final(sha256_handle, sha256_hashes);
+                        CHECK_AND_OUTPUT(sha256_hashes, 32, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA384: {
+                        uint8_t padded_blocks[BATCH_SIZE][128] __attribute__((aligned(32))) = {0};
+                        uint8_t sha384_hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for(int k = 0; k < batch_count; ++k) { sha512_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
+                        sha384_x8_init(sha384_handle);
+                        sha384_x8_update(sha384_handle, (const uint8_t(*)[128])padded_blocks);
+                        sha384_x8_final(sha384_handle, sha384_hashes);
+                        CHECK_AND_OUTPUT(sha384_hashes, 48, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA512: {
+                        uint8_t padded_blocks[BATCH_SIZE][128] __attribute__((aligned(32))) = {0};
+                        uint8_t sha512_hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for(int k = 0; k < batch_count; ++k) { sha512_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
+                        sha512_x8_init(sha512_handle);
+                        sha512_x8_update(sha512_handle, (const uint8_t(*)[128])padded_blocks);
+                        sha512_x8_final(sha512_handle, sha512_hashes);
+                        CHECK_AND_OUTPUT(sha512_hashes, 64, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SM3: {
+                        uint8_t sm3_hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        sm3_8x((const unsigned char**)password_ptrs, password_lens, sm3_hashes);
+                        CHECK_AND_OUTPUT(sm3_hashes, 32, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA3_224: {
+                        uint8_t hashes[BATCH_SIZE][28] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_224((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 28, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA3_256: {
+                        uint8_t hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 32, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA3_384: {
+                        uint8_t hashes[BATCH_SIZE][48] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_384((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 48, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_SHA3_512: {
+                        uint8_t hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        sha3_8x_512((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 64, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_KECCAK224: {
+                        uint8_t hashes[BATCH_SIZE][28] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_224((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 28, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_KECCAK256: {
+                        uint8_t hashes[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 32, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_KECCAK384: {
+                        uint8_t hashes[BATCH_SIZE][48] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_384((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 48, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_KECCAK512: {
+                        uint8_t hashes[BATCH_SIZE][64] __attribute__((aligned(32)));
+                        for (int i = 0; i < BATCH_SIZE; ++i) hashes_out_ptrs[i] = hashes[i];
+                        keccak_8x_512((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
+                        CHECK_AND_OUTPUT(hashes, 64, password_batch, batch_count);
+                        break;
+                    }
+                    case MODE_HASH160: {
+                        uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32))) = {0};
+                        uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
+                        uint8_t h160_hash[BATCH_SIZE][20] __attribute__((aligned(32)));
+                        const uint8_t* sha256_ptrs[BATCH_SIZE];
+                        size_t sha256_lens[BATCH_SIZE];
+
+                        for(int k = 0; k < batch_count; ++k) { 
+                            sha256_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); 
+                            sha256_ptrs[k] = sha256_results[k];
+                            sha256_lens[k] = 32;
+                        }
+                        for (int k = batch_count; k < BATCH_SIZE; ++k) {
+                            sha256_ptrs[k] = (const uint8_t*)""; // Empty string for padding
+                            sha256_lens[k] = 0;
+                        }
+
+                        sha256_x8_init(sha256_handle);
+                        sha256_x8_update(sha256_handle, (const uint8_t(*)[64])padded_blocks);
+                        sha256_x8_final(sha256_handle, sha256_results);
+                        
+                        ripemd160_multi_oneshot(sha256_ptrs, sha256_lens, h160_hash);
+                        CHECK_AND_OUTPUT(h160_hash, 20, password_batch, batch_count);
+                        break;
+                    }
                 }
-                case MODE_RIPEMD160: {
-                    uint8_t r_hashes[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    ripemd160_multi_init(&ripemd160_ctx);
-                    for(int k=0; k<batch_count; ++k) { memcpy(ripemd160_ctx.buffer[k], password_ptrs[k], password_lens[k]); ripemd160_ctx.buffer_len[k] = (uint32_t)password_lens[k]; }
-                    for(int k=batch_count; k<BATCH_SIZE; ++k) { ripemd160_ctx.buffer_len[k] = 0; }
-                    ripemd160_multi_final(&ripemd160_ctx, r_hashes);
-                    CHECK_AND_OUTPUT(r_hashes, 20, password_batch, batch_count);
-                    break;
-                }
-                case MODE_KECCAK256: {
-                    keccak_8x_256((const unsigned char**)password_ptrs, password_lens, hashes_out_ptrs);
-                    CHECK_AND_OUTPUT(keccak_hashes, 32, password_batch, batch_count);
-                    break;
-                }
-                case MODE_HASH160: {
-                    uint8_t padded_blocks[BATCH_SIZE][64] __attribute__((aligned(32))) = {0};
-                    uint8_t sha256_results[BATCH_SIZE][32] __attribute__((aligned(32)));
-                    uint8_t h160_hash[BATCH_SIZE][20] __attribute__((aligned(32)));
-                    for(int k = 0; k < batch_count; ++k) { sha256_pad_block(padded_blocks[k], (const char*)password_ptrs[k], password_lens[k]); }
-                    sha256_avx8_init(sha256_handle);
-                    sha256_avx8_update_8_blocks(sha256_handle, (const uint8_t(*)[64])padded_blocks);
-                    sha256_avx8_get_final_hashes(sha256_handle, sha256_results);
-                    ripemd160_multi_init(&ripemd160_ctx);
-                    for(int k=0; k<batch_count; ++k) { memcpy(ripemd160_ctx.buffer[k], sha256_results[k], 32); ripemd160_ctx.buffer_len[k] = 32; }
-                    for(int k=batch_count; k<BATCH_SIZE; ++k) { ripemd160_ctx.buffer_len[k] = 0; }
-                    ripemd160_multi_final(&ripemd160_ctx, h160_hash);
-                    CHECK_AND_OUTPUT(h160_hash, 20, password_batch, batch_count);
-                    break;
-                }
+                data->local_passwords_checked += batch_count;
             }
-            data->local_passwords_checked += batch_count;
         }
     }
 
+
     // --- 清理 ---
-    sha256_avx8_destroy(sha256_handle);
+    if (sha224_handle) sha224_x8_destroy(sha224_handle);
+    if (sha256_handle) sha256_x8_destroy(sha256_handle);
+    if (sha384_handle) sha384_x8_destroy(sha384_handle);
+    if (sha512_handle) sha512_x8_destroy(sha512_handle);
+
     return NULL;
 }

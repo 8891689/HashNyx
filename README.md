@@ -1,11 +1,11 @@
 # HashNyx
 
-HashNyx is a top-tier CPU-powered multi-threaded password hash cracker written in C. It is designed for flexibility and speed, utilizing various optimization techniques to efficiently find matches for a given hash value. It can crack md5, sha1, sha256, ripemd160, keccak256, hash160(encrypted BTC public key), and more.
+HashNyx is a high-performance, multi-threaded password hash cracker written in C. It is designed for flexibility and speed, utilizing various optimization techniques to efficiently find matches for given hash values.
 
 
 # Features
 Multi-threaded Architecture: Utilizes a producer-consumer model to maximize CPU usage, separating password generation from hash verification.
-1. Multiple Hash Algorithms: Supports common hashing algorithms including md5, sha1, sha256, ripemd160, keccak256, and hash160（Encrypted BTC public key）.
+1. Multiple Hash Algorithms: Supports common hashing algorithms including md5, sha1, sha256, ripemd160, keccak256, and hash160.
 
 2. Flexible Password Generation:
 1. Sequential Mode: Generates all possible combinations for a given length range and character set.
@@ -82,11 +82,6 @@ cat hashes.txt | ./HashNyx_bloom   ,  type 1.txt | HashNyx_bloom.exe
 ```
 
 Examples
-
-Testing and Verification
-
-Based on Intel® Xeon® E5-2697 v4 2.30 GHz single-threaded environment
-
 1. Extremely Fast Single Hash Mode Sequential Cracking
 Use a single thread to crack the hash values ​​of passwords between 5 and 10 characters in length.
 
@@ -153,7 +148,7 @@ or
 
 ```
 3. Batch Hash Password Cracking Using a Bloom Filter
-Use a pre-calculated Bloom filter (targets.bf) to quickly filter candidate results, then compare them to the complete list in 1.txt (check again before outputting to ensure 100% accuracy). This method is particularly effective when the search space is large.
+Use a pre-calculated Bloom filter (filter.bf) to quickly filter candidate results, then compare them to the complete list in 1.txt (check again before outputting to ensure 100% accuracy). This method is particularly effective when the search space is large.
 ```
  ./HashNyx -t 1 -l 5-9 -c d -m sha256 -b targets.bf -f 1.txt -o 111.txt
 [+] Found matches will be written to: 111.txt
@@ -210,15 +205,14 @@ The random password needs to add -R
 
 ```
 # Other ps 
-```
+
 d | 0123456789 [0-9]
 l | abcdefghijklmnopqrstuvwxyz [a-z]
 u | ABCDEFGHIJKLMNOPQRSTUVWXYZ [A-Z]
 k | 0123456789ABCDEF [0-9A-F]
 s | !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
 all | abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:'\",.<>?/`~"
-```
-```
+
 -l <range>      Password length range (e.g., 8-10 or 8).
 -c <sets>       Charset, comma-separated (d,u,l,s,k,all,pkc).
 
@@ -229,7 +223,7 @@ s:special,
 k:hex, 
 all:all
 pkc: public key mode (same as -pub)
-```
+
 You can use to separate the character sets needed for password cracking, such as numbers, uppercase letters -c d,u or all -c all
 
 Note that the generator will produce passwords longer than 13 characters, requiring -R, as the increment would exceed the count limit.

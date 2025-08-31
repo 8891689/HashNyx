@@ -10,13 +10,13 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 
-#define MAX_HASH_SIZE 32
+#define MAX_HASH_SIZE 64
 #define QUEUE_CAPACITY 8192
 
 // 验证任务
 typedef struct {
     char password[MAX_PASSWORD_LENGTH + 1];
-    uint8_t hash[MAX_HASH_SIZE];
+    uint8_t hash[MAX_HASH_SIZE]; 
     int hash_len;
 } VerificationTask;
 
@@ -34,23 +34,38 @@ typedef struct {
 } SharedQueue;
 // ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-
 // HashMode 和 GlobalState 的定义
 typedef enum {
     MODE_MD5,
     MODE_SHA1,
-    MODE_SHA256,
     MODE_RIPEMD160,
+    MODE_HASH160,
+    // SHA-2 Family
+    MODE_SHA224,
+    MODE_SHA256,
+    MODE_SHA384,
+    MODE_SHA512,
+    // SHA-3 Family
+    MODE_SHA3_224,
+    MODE_SHA3_256,
+    MODE_SHA3_384,
+    MODE_SHA3_512,
+    // Keccak Family
+    MODE_KECCAK224,
     MODE_KECCAK256,
-    MODE_HASH160
+    MODE_KECCAK384,
+    MODE_KECCAK512,
+    // SM3
+    MODE_SM3
 } HashMode;
+
 
 typedef struct {
     atomic_ullong passwords_checked;
     atomic_bool running;
     pthread_mutex_t *mutex;
+    int thread_count; 
 } GlobalState;
-
 
 
 // 扩展的线程数据结构

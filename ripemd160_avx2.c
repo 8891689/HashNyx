@@ -266,3 +266,26 @@ void ripemd160_multi_final(RIPEMD160_MULTI_CTX* ctx, uint8_t digests[LANE_COUNT]
         }
     }
 }
+
+/**
+ * @brief New One-Shot function implementation for high-performance small message hashing.
+ */
+void ripemd160_multi_oneshot(const uint8_t *data[LANE_COUNT], const size_t lens[LANE_COUNT], uint8_t digests[LANE_COUNT][DIGEST_SIZE]) {
+    // We can use a stack-allocated context for this one-shot operation.
+    CUSTOM_ALIGNAS(64) RIPEMD160_MULTI_CTX ctx;
+    
+    // 1. Initialize context state and buffers
+    ripemd160_multi_init(&ctx);
+
+    // 2. Copy data into internal buffers. The ripemd160_multi_final function
+    // is designed to work with these buffers, so this is the most direct way.
+    for (int i = 0; i < LANE_COUNT; ++i) {
+        // We assume lens[i] < 56, which is a precondition for this function.
+        memcpy(ctx.buffer[i], data[i], lens[i]);
+        ctx.buffer_len[i] = (uint32_t)lens[i];
+    }
+    
+    // 3. Call the existing finalization function, which handles padding and compression.
+    // It will correctly process the data we just put in the buffers.
+    ripemd160_multi_final(&ctx, digests);
+}

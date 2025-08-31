@@ -93,7 +93,6 @@ void* status_thread_worker(void* arg) {
     unsigned long long last_checked = 0;
     struct timespec start_time, current_time;
     
-    // 在循環開始前獲取一次啟動時間
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     while (atomic_load(&args->state->running)) {
@@ -116,7 +115,7 @@ void* status_thread_worker(void* arg) {
         fprintf(stderr, "\r[+] [%.1fs] Checked: %-12llu | Speed: %-7.2f M/s",
                 elapsed_since_start, current_checked, speed_m_per_s);
     }
-    fprintf(stderr, "\n");
+    //fprintf(stderr, "\n");
     return NULL;
 }
 
@@ -133,7 +132,11 @@ void printHelp() {
     printf("  -n <number>     Total number of passwords to generate in random mode (-R).\n");
     printf("  -pub            Shortcut for public key generation mode.\n\n");
     printf("Matching Options:\n");
-    printf("  -m <type>       Hash algorithm. Supports: md5, sha1, sha256, ripemd160, keccak256, hash160.\n");
+    printf("  -m <type>       Hash algorithm. Supports:\n");
+    printf("                  md5, sha1, ripemd160, hash160, sm3\n");
+    printf("                  sha224, sha256, sha384, sha512\n");
+    printf("                  sha3-224, sha3-256, sha3-384, sha3-512\n");
+    printf("                  keccak224, keccak256, keccak384, keccak512\n");
     printf("                  (default: sha256)\n");
     printf("  -a              Load a single hash value into the core for high-speed pre-screening.\n");
     printf("  -b <file>       Load Bloom filter file for high-speed pre-screening.\n");
@@ -169,6 +172,9 @@ int main(int argc, char *argv[]) {
     pthread_t *threadIds = NULL, *verifier_threads = NULL, status_thread;
     ThreadData *threadData = NULL, *verifier_data = NULL;
     SharedQueue* verification_queue = NULL;
+    
+    GlobalState state;
+    state.thread_count = threads; 
 
     if (argc == 1) {
         printHelp();
@@ -178,7 +184,10 @@ int main(int argc, char *argv[]) {
     // --- 參數解析 ---
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "-R") == 0) random = true;
-        else if(strcmp(argv[i], "-t") == 0 && i + 1 < argc) threads = atoi(argv[++i]);
+        else if(strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            threads = atoi(argv[++i]);
+            state.thread_count = threads; 
+        }
         else if(strcmp(argv[i], "-n") == 0 && i + 1 < argc) { numPasswords_ll_for_n = atoll(argv[++i]); n_specified = true; }
         else if(strcmp(argv[i], "-o") == 0 && i + 1 < argc) outputFile = argv[++i];
         else if(strcmp(argv[i], "-l") == 0 && i + 1 < argc) parseLengthRange(argv[++i], &minLength, &maxLength);
@@ -195,10 +204,21 @@ int main(int argc, char *argv[]) {
             char* mode_str = argv[++i];
             if (strcmp(mode_str, "md5") == 0) hash_mode = MODE_MD5;
             else if (strcmp(mode_str, "sha1") == 0) hash_mode = MODE_SHA1;
-            else if (strcmp(mode_str, "sha256") == 0) hash_mode = MODE_SHA256;
             else if (strcmp(mode_str, "ripemd160") == 0) hash_mode = MODE_RIPEMD160;
-            else if (strcmp(mode_str, "keccak256") == 0) hash_mode = MODE_KECCAK256;
             else if (strcmp(mode_str, "hash160") == 0) hash_mode = MODE_HASH160;
+            else if (strcmp(mode_str, "sm3") == 0) hash_mode = MODE_SM3;
+            else if (strcmp(mode_str, "sha224") == 0) hash_mode = MODE_SHA224;
+            else if (strcmp(mode_str, "sha256") == 0) hash_mode = MODE_SHA256;
+            else if (strcmp(mode_str, "sha384") == 0) hash_mode = MODE_SHA384;
+            else if (strcmp(mode_str, "sha512") == 0) hash_mode = MODE_SHA512;
+            else if (strcmp(mode_str, "sha3-224") == 0) hash_mode = MODE_SHA3_224;
+            else if (strcmp(mode_str, "sha3-256") == 0) hash_mode = MODE_SHA3_256;
+            else if (strcmp(mode_str, "sha3-384") == 0) hash_mode = MODE_SHA3_384;
+            else if (strcmp(mode_str, "sha3-512") == 0) hash_mode = MODE_SHA3_512;
+            else if (strcmp(mode_str, "keccak224") == 0) hash_mode = MODE_KECCAK224;
+            else if (strcmp(mode_str, "keccak256") == 0) hash_mode = MODE_KECCAK256;
+            else if (strcmp(mode_str, "keccak384") == 0) hash_mode = MODE_KECCAK384;
+            else if (strcmp(mode_str, "keccak512") == 0) hash_mode = MODE_KECCAK512;
             else { fprintf(stderr, "[-] Error: Unknown hash mode '%s'\n", mode_str); return 1; }
         }
         else if(strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { printHelp(); return 0; }
@@ -239,10 +259,6 @@ int main(int argc, char *argv[]) {
     
     if (pubkey_mode) {
         fprintf(stderr, "[+] Info: Public Key Generation Mode enabled.\n");
-        if (!random) {
-            fprintf(stderr, "[!] Warning: Public key mode requires random generation. Forcing -R mode.\n");
-            random = true;
-        }
         strcpy(selectedCharsets, "k");
         minLength = 66;
         maxLength = 66;
@@ -253,21 +269,17 @@ int main(int argc, char *argv[]) {
 
     // --- 文件和过滤器加载 ---
     if (!single_target_hex) {
-        
         if (bloomFile) {
-#ifdef _WIN32
-
-    fprintf(stderr, "[+] Loading Bloom filter using standard I/O for Windows...\n");
-    bf = bloom_load(bloomFile);
-#else
-
-    bf = bloom_mmap_load(bloomFile);
-#endif
-    if (!bf) { 
-        fprintf(stderr, "[-] Error: Failed to load Bloom filter file '%s'.\n", bloomFile); 
-        goto cleanup; 
-    }
-            
+        #ifdef _WIN32
+            fprintf(stderr, "[+] Loading Bloom filter using standard I/O for Windows...\n");
+            bf = bloom_load(bloomFile);
+        #else
+            bf = bloom_mmap_load(bloomFile);
+        #endif
+            if (!bf) { 
+                fprintf(stderr, "[-] Error: Failed to load Bloom filter file '%s'.\n", bloomFile); 
+                goto cleanup; 
+            }
             fprintf(stderr, "[+] Bloom filter loaded: %llu bits, %llu hashes.\n", (unsigned long long)bf->bit_count, (unsigned long long)bf->hash_count);
         }
         if (hashFile) {
@@ -287,17 +299,19 @@ int main(int argc, char *argv[]) {
 
     // --- 准备字符集等 ---
     char combinedCharset[4096] = {0}, uniqueCharset[4096] = {0};
-    char tempCharsets[1024]; strncpy(tempCharsets, selectedCharsets, sizeof(tempCharsets)-1);
-    char *token = strtok(tempCharsets, ",");
-    while(token != NULL) {
-        bool matched = false;
-        for(int j = 0; j < NUM_CHARSETS; j++) { if(strcmp(token, CHARSETS[j].identifier) == 0) { strcat(combinedCharset, CHARSETS[j].characters); matched = true; break; } }
-        if(!matched && strcmp(token, "pkc") != 0) { fprintf(stderr, "[-] Error: Invalid charset identifier: %s\n", token); return 1; }
-        token = strtok(NULL, ",");
+    if (!pubkey_mode) {
+        char tempCharsets[1024]; strncpy(tempCharsets, selectedCharsets, sizeof(tempCharsets)-1);
+        char *token = strtok(tempCharsets, ",");
+        while(token != NULL) {
+            bool matched = false;
+            for(int j = 0; j < NUM_CHARSETS; j++) { if(strcmp(token, CHARSETS[j].identifier) == 0) { strcat(combinedCharset, CHARSETS[j].characters); matched = true; break; } }
+            if(!matched && strcmp(token, "pkc") != 0) { fprintf(stderr, "[-] Error: Invalid charset identifier: %s\n", token); return 1; }
+            token = strtok(NULL, ",");
+        }
+        bool seen[256] = {false}; int k = 0;
+        for(size_t i = 0; i < strlen(combinedCharset); i++) { if (!seen[(unsigned char)combinedCharset[i]]) { seen[(unsigned char)combinedCharset[i]] = true; uniqueCharset[k++] = combinedCharset[i]; } }
+        uniqueCharset[k] = '\0';
     }
-    bool seen[256] = {false}; int k = 0;
-    for(size_t i = 0; i < strlen(combinedCharset); i++) { if (!seen[(unsigned char)combinedCharset[i]]) { seen[(unsigned char)combinedCharset[i]] = true; uniqueCharset[k++] = combinedCharset[i]; } }
-    uniqueCharset[k] = '\0';
     const char* finalCharset = uniqueCharset; int finalCharsetLength = strlen(finalCharset);
 
     // --- 初始化线程和状态 ---
@@ -306,7 +320,6 @@ int main(int argc, char *argv[]) {
     if (!threadIds || !threadData) { perror("[-] Error allocating memory for cracker threads"); goto cleanup; }
     
     pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
-    GlobalState state;
     atomic_init(&state.passwords_checked, 0);
     atomic_init(&state.running, true);
     state.mutex = &output_mutex; 
@@ -314,13 +327,26 @@ int main(int argc, char *argv[]) {
     vector_init(&start_indices_per_length);
 
     fprintf(stderr, "[+] Starting cracker with %d producer threads\n", threads);
-    fprintf(stderr, "[+] mode: %d, generator: %s\n", hash_mode, random ? "random" : "sequential");
+    fprintf(stderr, "[+] Generator: %s\n", random ? "random" : "sequential");
 
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     // --- 任务分配 ---
-    if (random) {
+    if (!random && pubkey_mode) {
+        fprintf(stderr, "[+] Public Key Sequential Mode enabled.\n");
+        if (n_specified) {
+            fprintf(stderr, "[+] Target count (-n) is used for progress display but run is infinite.\n");
+        } else {
+            fprintf(stderr, "[+] Total keys to generate: Infinite\n");
+        }
+        
+        for(int i = 0; i < threads; ++i) {
+            threadData[i].start_indices_per_length = NULL;
+            threadData[i].startIndex = i; // thread_id
+            threadData[i].endIndex = 0; // Not used in this mode
+        }
+    } else if (random) {
         if (n_specified && numPasswords_ll_for_n <= 0) {
              fprintf(stderr, "[-] Error: Number of passwords (-n) must be positive.\n"); goto cleanup;
         }
@@ -385,7 +411,7 @@ int main(int argc, char *argv[]) {
         threadData[i].random = random;
         threadData[i].charset = finalCharset;
         threadData[i].charsetLength = finalCharsetLength;
-        threadData[i].infinite = (random && !n_specified);
+        threadData[i].infinite = ( (random && !n_specified) || (!random && pubkey_mode) ); 
         threadData[i].hash_mode = hash_mode;
         threadData[i].pubkey_mode = pubkey_mode;
         threadData[i].debug_mode = debug_mode;
@@ -441,7 +467,7 @@ int main(int argc, char *argv[]) {
     }
 
 cleanup:
-    if (!random) { vector_free(&start_indices_per_length); }
+    if (!random && !pubkey_mode) { vector_free(&start_indices_per_length); }
     if (bf) { bloom_free(bf); }
     if (target_hashes) { hash_set_destroy(target_hashes); }
     if (verification_queue) { queue_destroy(verification_queue); }
