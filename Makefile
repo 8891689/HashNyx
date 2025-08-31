@@ -2,7 +2,7 @@
 
 CC = gcc
 
-OPTIMIZATION_FLAGS = -O3 -march=native -mavx2 -mfma -flto -static
+OPTIMIZATION_FLAGS = -O3 -march=native -mavx2 -mfma -flto=4 -funroll-loops -fomit-frame-pointer -fopenmp -static 
 WARNING_FLAGS = -Wall -Wextra
 LINKER_FLAGS = -pthread -lm
 
@@ -10,7 +10,7 @@ CFLAGS = $(OPTIMIZATION_FLAGS) $(WARNING_FLAGS) $(LINKER_FLAGS)
 
 TARGET = HashNyx
 
-CRACKER_SRCS = HashNyx.c HashNyx_thread.c utils.c wandian.c bloom.c md5_avx2.c sha1_avx2.c sha256_avx2.c ripemd160_avx2.c keccak_avx2.c hash_set.c
+CRACKER_SRCS = HashNyx.c HashNyx_thread.c utils.c wandian.c bloom.c md5_avx2.c sha1_avx2.c sha2_avx2.c ripemd160_avx2.c keccak_avx2.c sha3_avx2.c sm3_avx2.c hash_set.c
 CRACKER_OBJS = $(CRACKER_SRCS:.c=.o)
 
 BLOOM_TOOL = HashNyx_bloom
